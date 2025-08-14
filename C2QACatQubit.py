@@ -99,25 +99,42 @@ def create_two_photon_dissipator(cutoff):
     return a_squared
 
 
-def create_two_photon_noise_model(cutoff, gamma=0.1):
-    """使用PauliLindbladError创建双光子耗散噪声模型"""
-    # 对于连续变量系统，我们可以用等效的泡利算符组合来近似双光子耗散
-    # 这里使用X和Y泡利算符的组合来模拟耗散效应
+def create_two_photon_dissipation(gamma=0.1, num_qubits_per_qumode=3):
+    """创建作用于整个量模的双光子耗散噪声模型
+    每个量模由num_qubits_per_qumode个量子比特组成
+    """
+    I = Pauli('I')
     X = Pauli('X')
     Y = Pauli('Y')
 
-    # 创建PauliLindbladError，参数为(泡利算符列表, 噪声强度列表)
-    # 这是一种近似方法，用泡利算符组合模拟双光子耗散
-    pauli_error = PauliLindbladError(
-        [X, Y],  # 泡利算符列表
-        [gamma / 2, gamma / 2]  # 对应的噪声强度，总和为gamma
-    )
+    paulis = []
+    strengths = []
+    total_strength = gamma
+    # 每个量子比特的X和Y分量平均分配噪声强度
+    per_component_strength = total_strength / (2 * num_qubits_per_qumode)
 
-    noise_model = NoiseModel()
-    # 将噪声关联到连续变量门
-    noise_model.add_all_qubit_quantum_error(pauli_error, ["cv_d", "cv_c_rx", "cv_measure"])
-    return noise_model
+    # 为量模中的每个量子比特创建X和Y操作
+    for i in range(num_qubits_per_qumode):
+        # 构建作用于第i个量子比特的X操作，其他量子比特保持不变
+        x_ops = [I] * num_qubits_per_qumode
+        x_ops[i] = X
+        x_pauli = x_ops[0]
+        for op in x_ops[1:]:
+            x_pauli ^= op
 
+        # 构建作用于第i个量子比特的Y操作，其他量子比特保持不变
+        y_ops = [I] * num_qubits_per_qumode
+        y_ops[i] = Y
+        y_pauli = y_ops[0]
+        for op in y_ops[1:]:
+            y_pauli ^= op
+
+        paulis.append(x_pauli)
+        paulis.append(y_pauli)
+        strengths.append(per_component_strength)
+        strengths.append(per_component_strength)
+
+    return PauliLindbladError(paulis, strengths)
 # 使用cv_c_rx门实现受控操作
 # --------------------------
 def noise_biased_cx(qc, ancilla, data_qumode):
@@ -128,12 +145,15 @@ def noise_biased_cx(qc, ancilla, data_qumode):
 # --------------------------
 # 稳定器测量
 # --------------------------
-def measure_stabilizer(qc, data_idx, ancilla_idx,cutoff,temp_reg):
+def measure_stabilizer(qc, data_idx, ancilla_idx,cutoff,temp_reg,two_photon_dissipation):
     """测量重复码稳定器"""
     ancilla = ancillas[ancilla_idx]
     qc.h(ancilla)
     noise_biased_cx(qc, ancilla, qumodes[data_idx])
     noise_biased_cx(qc, ancilla, qumodes[data_idx + 1])
+    if data_idx==0:
+        qc.append(two_photon_dissipation,qumodes[data_idx] )
+    qc.append(two_photon_dissipation, qumodes[data_idx+1])
     qc.h(ancilla)
     qc.measure(ancilla, temp_reg[ancilla_idx])
     qc.reset(ancilla)
@@ -168,7 +188,8 @@ odd_cat = prepare_cat_state(alpha, cutoff, is_even=False)
 plot_photon_distribution(even_cat, f"偶猫态（α=√1.5）光子数分布", cutoff)
 # 绘制奇猫态光子数分布（仅奇数n有值）
 plot_photon_distribution(odd_cat, f"奇猫态（α=√1.5）光子数分布", cutoff)
-
+# 创建双光子耗散噪声
+two_photon_dissipation = create_two_photon_dissipation(gamma=0.1)
 qc.add_register(temp_reg)
  # 对每个qumode初始化猫态
 if is_even:
@@ -191,7 +212,8 @@ for cycle in range(num_cycles):
 
     # 测量所有稳定器
     for i in range(num_ancilla):
-        qc = measure_stabilizer(qc, data_idx=i, ancilla_idx=i,cutoff=cutoff,temp_reg=temp_reg)
+        qc = measure_stabilizer(qc, data_idx=i, ancilla_idx=i,cutoff=cutoff,
+                                temp_reg=temp_reg,two_photon_dissipation=two_photon_dissipation)
 
 # --------------------------
 # 8. 最终测量
@@ -203,12 +225,9 @@ for i in range(num_data):
 # 9. 模拟执行与结果分析
 # --------------------------
 
-noise_model = create_two_photon_noise_model(cutoff, gamma=0.1)
-
 state,result,_ = c2.util.simulate(
     cvcircuit=qc,
     shots=1024,
-    noise_model=noise_model
 )
 
 counts = result.get_counts()
